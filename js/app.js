@@ -304,7 +304,7 @@
       session,
       '<h1 class="page-title">Início</h1>' +
         '<p class="page-lead">Olá, ' +
-        FSY.esc(session.nome.split(" ")[0]) +
+        FSY.esc(String(session.nome || "olá").split(" ")[0]) +
         (FSY.isAdmin(session)
           ? ". Você é a administradora: cadastre os e-mails da liderança em Usuários."
           : ". Visão geral da conferência.") +
@@ -980,10 +980,6 @@
       return v && a.indexOf(v) === i;
     });
   }
-    return arr.filter(function (v, i, a) {
-      return v && a.indexOf(v) === i;
-    });
-  }
 
   function modalHtml(title, body, wide) {
     return (
@@ -1552,6 +1548,7 @@
           toast("Não foi possível baixar o modelo. Use o Excel exportado do formulário.");
         });
     }
+    if (action === "download-modelo") {
       FSY.downloadText(
         "modelo-participantes.csv",
         "Nome,Ala,Estaca,Contato Líder,Contato Responsável,Consultor,Companhia,Quarto,Observações\r\nMaria Silva,Ala Centro,Estaca Recife,81999990000,81988880000,Ana Costa,1,101,Alergia a amendoim\r\nJoão Santos,Ala Norte,Estaca Recife,81977770000,81966660000,Ana Costa,1,101,",
