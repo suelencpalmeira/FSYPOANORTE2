@@ -24,9 +24,12 @@
     toastTimer: null,
     participantes: [],
     usuarios: [],
-    filters: { q: "", companhia: "", estaca: "", sort: "nome", page: 1 },
+    filters: { q: "", companhia: "", estaca: "", tipo: "", sort: "nome", page: 1 },
     userFilters: { status: "todos", perfil: "todos" },
     importRows: [],
+    importParsed: null,
+    importFile: null,
+    importReport: null,
     logoClicks: 0,
   };
 
@@ -246,6 +249,7 @@
   }
 
   function field(name, label, type, required, value) {
+    const val = value != null && value !== "" ? ' value="' + FSY.esc(value) + '"' : "";
     return (
       '<label class="field"><span>' +
       label +
@@ -256,8 +260,26 @@
       type +
       '"' +
       (required ? " required" : "") +
-      (value ? ' value="' + FSY.esc(value) + '"' : "") +
+      val +
       "></label>"
+    );
+  }
+
+  function selectField(name, label, options, value) {
+    return (
+      '<label class="field"><span>' +
+      label +
+      "</span><select name=\"" +
+      name +
+      '">' +
+      options
+        .map(function (opt) {
+          const val = opt.value;
+          const sel = String(value == null ? "" : value) === String(val) ? " selected" : "";
+          return "<option value=\"" + FSY.esc(val) + "\"" + sel + ">" + FSY.esc(opt.label) + "</option>";
+        })
+        .join("") +
+      "</select></label>"
     );
   }
 
@@ -265,9 +287,18 @@
     if (session.perfil === "consultor" && !FSY.isLideranca(session)) return viewConsultorHome(session);
     const rows = await FSY.listParticipantes();
     state.participantes = rows;
-    const companhias = new Set(rows.map(function (r) { return r.companhia; }));
+    const companhias = new Set(
+      rows
+        .map(function (r) {
+          return r.companhia;
+        })
+        .filter(function (v) {
+          return v != null && v !== "";
+        })
+    );
     const semQuarto = rows.filter(function (r) { return !r.quarto; }).length;
-    const comObs = rows.filter(function (r) { return r.observacoes; }).length;
+    const comObs = rows.filter(function (r) { return hasAlerta(r); }).length;
+    const menores = rows.filter(function (r) { return r.menor_idade; }).length;
     const pendentes = await FSY.countPendentes();
     return shell(
       session,
@@ -283,6 +314,7 @@
         stat(companhias.size, "Companhias", "gold") +
         stat(semQuarto, "Sem quarto", "warn") +
         stat(comObs, "Com observações", "warn") +
+        stat(menores, "Menores de idade", menores ? "warn" : "") +
         stat(pendentes, "Acessos pendentes", pendentes ? "alert" : "") +
         "</div>" +
         '<div class="toolbar">' +
@@ -315,14 +347,19 @@
     const q = f.q.trim().toLowerCase();
     if (q) {
       rows = rows.filter(function (r) {
-        return [r.nome, r.ala, r.estaca, r.consultor].join(" ").toLowerCase().indexOf(q) !== -1;
+        return [r.nome, r.nome_preferencia, r.ala, r.estaca, r.consultor, r.email].join(" ").toLowerCase().indexOf(q) !== -1;
       });
     }
     if (f.companhia) rows = rows.filter(function (r) { return String(r.companhia) === String(f.companhia); });
     if (f.estaca) rows = rows.filter(function (r) { return r.estaca === f.estaca; });
+    if (f.tipo) rows = rows.filter(function (r) { return r.tipo === f.tipo; });
     rows.sort(function (a, b) {
-      if (f.sort === "companhia") return a.companhia - b.companhia || a.nome.localeCompare(b.nome, "pt-BR");
-      return a.nome.localeCompare(b.nome, "pt-BR");
+      if (f.sort === "companhia") {
+        const ac = a.companhia == null ? 9999 : a.companhia;
+        const bc = b.companhia == null ? 9999 : b.companhia;
+        return ac - bc || String(a.nome).localeCompare(String(b.nome), "pt-BR");
+      }
+      return String(a.nome).localeCompare(String(b.nome), "pt-BR");
     });
     const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
     if (f.page > pages) f.page = pages;
@@ -336,14 +373,16 @@
           "<tr data-action='open-part' data-id='" +
           r.id +
           "'><td>" +
-          FSY.esc(r.nome) +
-          (r.observacoes ? " ⚠️" : "") +
+          FSY.esc(displayNome(r)) +
+          tipoBadge(r) +
+          menorBadge(r) +
+          (hasAlerta(r) ? " ⚠️" : "") +
           "</td><td>" +
           FSY.esc(r.ala) +
           "</td><td>" +
           FSY.esc(r.estaca) +
           "</td><td>" +
-          r.companhia +
+          ciaLabel(r.companhia) +
           "</td><td>" +
           FSY.esc(r.quarto || "—") +
           "</td><td>" +
@@ -413,6 +452,11 @@
         ">Ordenar por nome</option><option value='companhia'" +
         (f.sort === "companhia" ? " selected" : "") +
         ">Ordenar por companhia</option></select>" +
+        '<select id="filtro-tipo"><option value="">Tipo</option><option value="participante"' +
+        (f.tipo === "participante" ? " selected" : "") +
+        ">Participante</option><option value='consultor'" +
+        (f.tipo === "consultor" ? " selected" : "") +
+        ">Consultor</option></select>" +
         '<a class="btn btn-primary" href="#/participantes/novo">Adicionar</a>' +
         '<button class="btn btn-outline" data-action="import">Importar planilha</button>' +
         '<button class="btn btn-ghost" data-action="export">Exportar CSV</button>' +
@@ -442,26 +486,31 @@
   }
 
   function personCard(r, editable) {
-    const wa = FSY.waLink(r.contato_responsavel);
+    const wa = FSY.waLink(r.contato_responsavel || r.telefone_responsavel || r.contato1_telefone);
+    const menor = r.menor_idade || (r.idade != null && Number(r.idade) < 18);
     return (
       '<article class="person-card' +
-      (r.observacoes ? " obs" : "") +
+      (hasAlerta(r) ? " obs" : "") +
+      (menor ? " menor" : "") +
       '" data-action="open-part" data-id="' +
       r.id +
       '"><div class="person-name">' +
-      FSY.esc(r.nome) +
-      (r.observacoes ? " ⚠️" : "") +
+      FSY.esc(displayNome(r)) +
+      tipoBadge(r) +
+      menorBadge(r) +
+      (hasAlerta(r) ? " ⚠️" : "") +
       "</div>" +
       '<div class="meta">' +
       FSY.esc(r.ala) +
       " · " +
       FSY.esc(r.estaca) +
       " · Cia " +
-      r.companhia +
+      ciaLabel(r.companhia) +
       (r.quarto ? " · Quarto " + FSY.esc(r.quarto) : "") +
+      (r.idade != null ? " · " + r.idade + " anos" : "") +
       "</div>" +
       '<div class="meta">Consultor: ' +
-      FSY.esc(r.consultor) +
+      FSY.esc(r.consultor || "—") +
       "</div>" +
       (editable
         ? '<div class="actions" onclick="event.stopPropagation()"><a class="btn btn-ghost btn-sm" href="#/participantes/editar/' +
@@ -469,7 +518,7 @@
           '">Editar</a><button class="btn btn-ghost btn-sm" data-action="del-part" data-id="' +
           r.id +
           '" data-nome="' +
-          FSY.esc(r.nome) +
+          FSY.esc(displayNome(r)) +
           '">Excluir</button></div>'
         : "") +
       (wa
@@ -477,7 +526,8 @@
           wa +
           '" target="_blank" rel="noopener" onclick="event.stopPropagation()">' +
           ICONS.wa +
-          " Responsável</a>"
+          (menor ? " Responsável" : " Contato") +
+          "</a>"
         : "") +
       "</article>"
     );
@@ -488,6 +538,15 @@
     const id = state.params.id;
     let row = {
       nome: "",
+      sobrenome: "",
+      nome_preferencia: "",
+      data_nascimento: "",
+      sexo: "",
+      telefone: "",
+      email: "",
+      idade: "",
+      tipo: "participante",
+      situacao: "pendente",
       ala: "",
       estaca: "",
       contato_lider: "",
@@ -496,8 +555,30 @@
       companhia: "",
       quarto: "",
       observacoes: "",
+      tamanho_camiseta: "",
+      alimentacao: "",
+      contato1_nome: "",
+      contato1_email: "",
+      contato1_telefone: "",
+      contato2_nome: "",
+      contato2_email: "",
+      contato2_telefone: "",
+      bispo_nome: "",
+      bispo_email: "",
+      apresentacao: "",
+      membro_igreja: "",
+      nome_responsavel: "",
+      telefone_responsavel: "",
+      documento: "",
+      orgao_emissor: "",
+      cpf: "",
+      info_medicas: "",
+      condicoes_saude: "",
+      detalhe_saude: "",
+      autorizacao_pais: "",
     };
     if (id) row = await FSY.getParticipante(id);
+    const menor = row.menor_idade || (row.idade != null && Number(row.idade) < 18);
     return shell(
       session,
       '<h1 class="page-title">' +
@@ -506,15 +587,83 @@
         '<form class="card stack" data-form="participante" data-id="' +
         FSY.esc(id || "") +
         '">' +
+        '<h2 class="section-title">Identificação</h2>' +
         field("nome", "Nome completo", "text", true, row.nome) +
-        field("ala", "Ala", "text", true, row.ala) +
-        field("estaca", "Estaca", "text", true, row.estaca) +
-        field("contato_lider", "Contato do líder", "tel", true, row.contato_lider) +
-        field("contato_responsavel", "Contato do responsável", "tel", true, row.contato_responsavel) +
+        field("sobrenome", "Sobrenome", "text", false, row.sobrenome || "") +
+        field("nome_preferencia", "Nome de preferência", "text", false, row.nome_preferencia || "") +
+        field("data_nascimento", "Data de nascimento", "date", false, row.data_nascimento || "") +
+        field("idade", "Idade", "number", false, row.idade == null ? "" : row.idade) +
+        selectField("sexo", "Sexo", [
+          { value: "", label: "Não informado" },
+          { value: "Sexo masculino", label: "Sexo masculino" },
+          { value: "Sexo feminino", label: "Sexo feminino" },
+        ], row.sexo) +
+        field("telefone", "Telefone", "tel", false, row.telefone || "") +
+        field("email", "E-mail", "email", false, row.email || "") +
+        selectField("tipo", "Tipo", [
+          { value: "participante", label: "Participante" },
+          { value: "consultor", label: "Consultor" },
+        ], row.tipo || "participante") +
+        selectField("situacao", "Situação da inscrição", [
+          { value: "pendente", label: "Aguardando aprovação" },
+          { value: "aprovado", label: "Aprovado" },
+        ], row.situacao || "pendente") +
+        selectField("membro_igreja", "É membro da Igreja?", [
+          { value: "", label: "Não informado" },
+          { value: "true", label: "Sim" },
+          { value: "false", label: "Não" },
+        ], row.membro_igreja == null ? "" : String(row.membro_igreja)) +
+        '<h2 class="section-title">Igreja e operação</h2>' +
+        field("ala", "Ala / ramo", "text", true, row.ala) +
+        field("estaca", "Estaca / distrito", "text", true, row.estaca) +
+        field("bispo_nome", "Nome do bispo", "text", false, row.bispo_nome || "") +
+        field("bispo_email", "E-mail do bispo", "email", false, row.bispo_email || "") +
         field("consultor", "Consultor responsável", "text", true, row.consultor) +
-        field("companhia", "Número da companhia", "number", true, row.companhia) +
+        field("companhia", "Número da companhia", "number", false, row.companhia == null ? "" : row.companhia) +
         field("quarto", "Número do quarto", "text", false, row.quarto || "") +
-        '<label class="field"><span>Observações</span><textarea name="observacoes" placeholder="Restrições alimentares, medicamentos, etc.">' +
+        field("tamanho_camiseta", "Tamanho da camiseta", "text", false, row.tamanho_camiseta || "") +
+        '<h2 class="section-title">Contatos</h2>' +
+        field("contato_lider", "Contato do líder", "tel", true, row.contato_lider) +
+        field("contato_responsavel", "Contato principal / responsável", "tel", true, row.contato_responsavel) +
+        field("contato1_nome", "Nome do contato 1", "text", false, row.contato1_nome || "") +
+        field("contato1_email", "E-mail do contato 1", "email", false, row.contato1_email || "") +
+        field("contato1_telefone", "Telefone do contato 1", "tel", false, row.contato1_telefone || "") +
+        field("contato2_nome", "Nome do contato 2", "text", false, row.contato2_nome || "") +
+        field("contato2_email", "E-mail do contato 2", "email", false, row.contato2_email || "") +
+        field("contato2_telefone", "Telefone do contato 2", "tel", false, row.contato2_telefone || "") +
+        '<div class="banner-menor' +
+        (menor ? "" : " hidden") +
+        '"><strong>Menor de idade.</strong> Confira o responsável e a autorização dos pais.</div>' +
+        '<h2 class="section-title">Responsável (menores)</h2>' +
+        field("nome_responsavel", "Nome do responsável", "text", false, row.nome_responsavel || "") +
+        field("telefone_responsavel", "Telefone do responsável", "tel", false, row.telefone_responsavel || "") +
+        selectField("autorizacao_pais", "Autorização dos pais", [
+          { value: "", label: "Não informado" },
+          { value: "true", label: "Sim" },
+          { value: "false", label: "Não" },
+        ], row.autorizacao_pais == null ? "" : String(row.autorizacao_pais)) +
+        '<h2 class="section-title">Saúde e alimentação</h2>' +
+        '<p class="muted">Dados de saúde ficam visíveis só para a liderança.</p>' +
+        '<label class="field"><span>Alimentação</span><textarea name="alimentacao">' +
+        FSY.esc(row.alimentacao || "") +
+        "</textarea></label>" +
+        '<label class="field"><span>Informações médicas</span><textarea name="info_medicas">' +
+        FSY.esc(row.info_medicas || "") +
+        "</textarea></label>" +
+        '<label class="field"><span>Condições de saúde</span><textarea name="condicoes_saude">' +
+        FSY.esc(row.condicoes_saude || "") +
+        "</textarea></label>" +
+        '<label class="field"><span>Detalhe da condição de saúde</span><textarea name="detalhe_saude">' +
+        FSY.esc(row.detalhe_saude || "") +
+        "</textarea></label>" +
+        '<h2 class="section-title">Documentos (acesso restrito)</h2>' +
+        field("documento", "RG / CIN / Passaporte", "text", false, row.documento || "") +
+        field("orgao_emissor", "Órgão emissor", "text", false, row.orgao_emissor || "") +
+        field("cpf", "CPF", "text", false, row.cpf || "") +
+        '<label class="field"><span>O que vai apresentar?</span><textarea name="apresentacao">' +
+        FSY.esc(row.apresentacao || "") +
+        "</textarea></label>" +
+        '<label class="field"><span>Observações operacionais</span><textarea name="observacoes" placeholder="Uso interno da liderança">' +
         FSY.esc(row.observacoes || "") +
         "</textarea></label>" +
         '<div class="row"><button class="btn btn-primary" type="submit">Salvar</button>' +
@@ -526,7 +675,12 @@
     if (!requireLideranca()) return "";
     const rows = await FSY.listParticipantes();
     const map = {};
+    const semCia = [];
     rows.forEach(function (r) {
+      if (r.companhia == null || r.companhia === "") {
+        semCia.push(r);
+        return;
+      }
       if (!map[r.companhia]) map[r.companhia] = [];
       map[r.companhia].push(r);
     });
@@ -540,7 +694,7 @@
         const list = map[k];
         const consultor = list[0] ? list[0].consultor : "—";
         const hasObs = list.some(function (p) {
-          return p.observacoes;
+          return hasAlerta(p);
         });
         return (
           '<article class="company-card' +
@@ -567,10 +721,27 @@
         );
       })
       .join("");
+    const semCard = semCia.length
+      ? '<article class="company-card"><h3>Sem companhia</h3><p class="muted">' +
+        semCia.length +
+        ' inscritos ainda sem número de companhia</p><details><summary>Ver participantes</summary><div class="list" style="margin-top:10px">' +
+        semCia
+          .map(function (p) {
+            return (
+              "<div>" +
+              FSY.esc(displayNome(p)) +
+              tipoBadge(p) +
+              (hasAlerta(p) ? " ⚠️" : "") +
+              "</div>"
+            );
+          })
+          .join("") +
+        "</div></details></article>"
+      : "";
     return shell(
       session,
       '<h1 class="page-title">Companhias</h1><p class="page-lead">Cards com borda dourada indicam observações na companhia.</p><div class="grid-cards">' +
-        (cards || '<div class="empty">Nenhuma companhia ainda.</div>') +
+        (semCard + cards || '<div class="empty">Nenhuma companhia ainda.</div>') +
         "</div>"
     );
   }
@@ -717,17 +888,20 @@
     const rows = await FSY.minhaCompanhia(session.nome);
     const cards = rows
       .map(function (r) {
-        const wa = FSY.waLink(r.contato_responsavel);
+        const wa = FSY.waLink(r.contato_responsavel || r.contato1_telefone);
         return (
           '<article class="person-card' +
-          (r.observacoes ? " obs" : "") +
+          (hasAlerta(r) ? " obs" : "") +
+          (r.menor_idade ? " menor" : "") +
           '"><div class="person-name">' +
-          FSY.esc(r.nome) +
+          FSY.esc(displayNome(r)) +
+          menorBadge(r) +
           "</div>" +
           '<div class="meta">' +
           FSY.esc(r.ala) +
           " · " +
           FSY.esc(r.estaca) +
+          (r.idade != null ? " · " + r.idade + " anos" : "") +
           "</div>" +
           '<div class="meta">Quarto: ' +
           FSY.esc(r.quarto || "não definido") +
@@ -743,9 +917,12 @@
               " " +
               FSY.esc(r.contato_responsavel) +
               "</a>"
-            : '<div class="meta">Responsável: ' + FSY.esc(r.contato_responsavel) + "</div>") +
-          (r.observacoes
-            ? '<div class="alert" style="margin-top:8px">⚠️ ' + FSY.esc(r.observacoes) + "</div>"
+            : '<div class="meta">Contato: ' + FSY.esc(r.contato_responsavel) + "</div>") +
+          (r.alimentacao
+            ? '<div class="alert" style="margin-top:8px">Alimentação: ' + FSY.esc(r.alimentacao) + "</div>"
+            : "") +
+          (r.alerta_saude
+            ? '<div class="alert" style="margin-top:8px">⚠️ Há informação de saúde. Consulte a liderança.</div>'
             : "") +
           "</article>"
         );
@@ -774,15 +951,45 @@
     );
   }
 
+  function displayNome(r) {
+    return FSY.displayNome ? FSY.displayNome(r) : r.nome;
+  }
+
+  function ciaLabel(n) {
+    return n == null || n === "" ? "—" : n;
+  }
+
+  function hasAlerta(r) {
+    return Boolean(r.alerta_saude || r.observacoes || r.alimentacao);
+  }
+
+  function tipoBadge(r) {
+    if (r.tipo === "consultor") return ' <span class="badge">Consultor</span>';
+    return "";
+  }
+
+  function menorBadge(r) {
+    if (r.menor_idade || (r.idade != null && Number(r.idade) < 18)) {
+      return ' <span class="badge badge-menor">Menor</span>';
+    }
+    return "";
+  }
+
   function unique(arr) {
     return arr.filter(function (v, i, a) {
       return v && a.indexOf(v) === i;
     });
   }
+    return arr.filter(function (v, i, a) {
+      return v && a.indexOf(v) === i;
+    });
+  }
 
-  function modalHtml(title, body) {
+  function modalHtml(title, body, wide) {
     return (
-      '<div class="modal-backdrop" id="modal"><div class="modal" role="dialog" aria-modal="true"><h2 class="page-title" style="font-size:24px">' +
+      '<div class="modal-backdrop" id="modal"><div class="modal' +
+      (wide ? " modal-wide" : "") +
+      '" role="dialog" aria-modal="true"><h2 class="page-title" style="font-size:24px">' +
       title +
       '</h2><div style="margin-top:12px">' +
       body +
@@ -802,48 +1009,301 @@
     if (m) m.remove();
   }
 
+  function phoneLink(label, phone) {
+    const wa = FSY.waLink(phone);
+    if (!phone) return detail(label, "—");
+    if (!wa) return detail(label, phone);
+    return (
+      "<div><strong>" +
+      label +
+      '</strong><div><a class="wa" href="' +
+      wa +
+      '" target="_blank" rel="noopener">' +
+      ICONS.wa +
+      " " +
+      FSY.esc(phone) +
+      "</a></div></div>"
+    );
+  }
+
   function openParticipante(row, canEdit) {
-    const wa = FSY.waLink(row.contato_responsavel);
-    const body =
+    const lideranca = FSY.isLideranca(FSY.getSession());
+    const menor = row.menor_idade || (row.idade != null && Number(row.idade) < 18);
+    let body =
       '<div class="stack">' +
-      detail("Nome", row.nome) +
+      (menor ? '<div class="banner-menor"><strong>Menor de idade.</strong> Confira o responsável.</div>' : "") +
+      detail("Nome", displayNome(row)) +
+      (row.nome_preferencia && row.nome_preferencia !== row.nome ? detail("Nome completo", row.nome) : "") +
+      detail("Tipo", row.tipo === "consultor" ? "Consultor" : "Participante") +
+      detail("Situação", row.situacao === "aprovado" ? "Aprovado" : "Aguardando aprovação") +
+      detail("Idade", row.idade != null ? String(row.idade) : "—") +
+      detail("Nascimento", row.data_nascimento ? FSY.formatDate(row.data_nascimento) : "—") +
+      detail("Sexo", row.sexo || "—") +
+      phoneLink("Telefone", row.telefone) +
+      detail("E-mail", row.email || "—") +
       detail("Ala", row.ala) +
       detail("Estaca", row.estaca) +
-      detail("Companhia", row.companhia) +
+      detail("Companhia", ciaLabel(row.companhia)) +
       detail("Quarto", row.quarto || "—") +
-      detail("Consultor", row.consultor) +
-      detail("Contato do líder", row.contato_lider) +
-      detail(
-        "Contato do responsável",
-        wa
-          ? '<a class="wa" href="' + wa + '" target="_blank" rel="noopener">' + ICONS.wa + " " + FSY.esc(row.contato_responsavel) + "</a>"
-          : FSY.esc(row.contato_responsavel)
-      ) +
-      (row.observacoes ? '<div class="alert">⚠️ ' + FSY.esc(row.observacoes) + "</div>" : "") +
+      detail("Consultor", row.consultor || "—") +
+      detail("Camiseta", row.tamanho_camiseta || "—") +
+      detail("Membro da Igreja", row.membro_igreja == null ? "—" : row.membro_igreja ? "Sim" : "Não") +
+      phoneLink("Contato do líder", row.contato_lider) +
+      phoneLink("Contato principal", row.contato_responsavel) +
+      (row.contato1_nome ? detail("Contato 1", row.contato1_nome + (row.contato1_telefone ? " · " + row.contato1_telefone : "")) : "") +
+      (row.contato2_nome ? detail("Contato 2", row.contato2_nome + (row.contato2_telefone ? " · " + row.contato2_telefone : "")) : "") +
+      (row.alimentacao ? '<div class="alert">Alimentação: ' + FSY.esc(row.alimentacao) + "</div>" : "");
+    if (lideranca) {
+      body +=
+        (menor || row.nome_responsavel
+          ? '<div class="sensivel-box">' +
+            "<strong>Responsável</strong>" +
+            detail("Nome", row.nome_responsavel || "—") +
+            phoneLink("Telefone", row.telefone_responsavel) +
+            detail("Autorização dos pais", row.autorizacao_pais == null ? "—" : row.autorizacao_pais ? "Sim" : "Não") +
+            "</div>"
+          : "") +
+        (row.alerta_saude || row.info_medicas || row.condicoes_saude || row.detalhe_saude
+          ? '<div class="sensivel-box">' +
+            "<strong>Saúde (acesso restrito)</strong>" +
+            (row.info_medicas ? detail("Informações médicas", row.info_medicas) : "") +
+            (row.condicoes_saude ? detail("Condições", row.condicoes_saude) : "") +
+            (row.detalhe_saude ? detail("Detalhe", row.detalhe_saude) : "") +
+            "</div>"
+          : "") +
+        '<div class="sensivel-box"><strong>Documentos (acesso restrito)</strong>' +
+        detail("Documento", row.documento || "—") +
+        detail("Órgão emissor", row.orgao_emissor || "—") +
+        detail("CPF", row.cpf || "não informado") +
+        "</div>";
+    } else if (row.alerta_saude) {
+      body += '<div class="alert">⚠️ Há informação de saúde. Consulte a liderança.</div>';
+    }
+    if (row.observacoes) body += '<div class="alert">⚠️ ' + FSY.esc(row.observacoes) + "</div>";
+    body +=
       '<div class="row">' +
       (canEdit
         ? '<a class="btn btn-primary" href="#/participantes/editar/' + row.id + '" data-action="close-modal">Editar</a>'
         : "") +
       '<button class="btn btn-ghost" data-action="close-modal">Fechar</button></div></div>';
-    showModal(modalHtml(FSY.esc(row.nome), body));
+    showModal(modalHtml(FSY.esc(displayNome(row)), body));
   }
 
   function detail(label, value) {
     return "<div><strong>" + label + "</strong><div>" + (String(value).indexOf("<") === 0 ? value : FSY.esc(value)) + "</div></div>";
   }
 
+  function mappingSelects(parsed) {
+    if (!parsed || parsed.format !== "inscricao") return "";
+    const headers = parsed.headers || [];
+    const cols = (window.FSYImport && window.FSYImport.EXPECTED_COLUMNS) || parsed.expected || [];
+    if (!cols.length) return "";
+    const unmapped = cols.filter(function (c) {
+      return parsed.mapping[c.key] < 0;
+    }).length;
+    return (
+      '<details class="map-box"' +
+      (unmapped > 8 ? " open" : "") +
+      "><summary>Conferir mapeamento de colunas" +
+      (unmapped ? " (" + unmapped + " não encontradas)" : "") +
+      "</summary><div class=\"map-grid\">" +
+      cols
+        .map(function (c) {
+          const current = parsed.mapping[c.key];
+          return (
+            '<label class="field"><span>' +
+            FSY.esc(c.label) +
+            '</span><select data-map-field="' +
+            c.key +
+            '"><option value="-1">(ignorar)</option>' +
+            headers
+              .map(function (h, idx) {
+                return (
+                  '<option value="' +
+                  idx +
+                  '"' +
+                  (Number(current) === idx ? " selected" : "") +
+                  ">" +
+                  FSY.esc(h || "Coluna " + (idx + 1)) +
+                  "</option>"
+                );
+              })
+              .join("") +
+            "</select></label>"
+          );
+        })
+        .join("") +
+      "</div></details>"
+    );
+  }
+
+  function renderImportPreview() {
+    const box = document.getElementById("import-preview");
+    const btn = document.getElementById("btn-confirm-import");
+    if (!box) return;
+    const parsed = state.importParsed;
+    const rows = state.importRows || [];
+    if (!parsed) {
+      box.innerHTML = "";
+      if (btn) btn.disabled = true;
+      return;
+    }
+    const Imp = window.FSYImport;
+    const summary = Imp && Imp.summarize ? Imp.summarize(rows, parsed.skipped) : { total: rows.length, withIssues: 0, duplicates: 0 };
+    const preview = rows.slice(0, 12);
+    const issueRows = rows.filter(function (r) { return r.issues && r.issues.length; }).slice(0, 20);
+    const sheetOpts = (parsed.sheetNames || [])
+      .map(function (n) {
+        return (
+          '<option value="' +
+          FSY.esc(n) +
+          '"' +
+          (n === parsed.sheetName ? " selected" : "") +
+          ">" +
+          FSY.esc(n) +
+          "</option>"
+        );
+      })
+      .join("");
+    box.innerHTML =
+      (parsed.format === "inscricao"
+        ? '<p>Lendo a aba <strong>' +
+          FSY.esc(parsed.sheetName) +
+          "</strong> (" +
+          parsed.mappedCount +
+          " colunas reconhecidas).</p>"
+        : "<p>Planilha no formato antigo de operação (nome, ala, estaca, companhia…).</p>") +
+      (parsed.sheetNames && parsed.sheetNames.length > 1
+        ? '<label class="field"><span>Aba</span><select id="import-sheet">' + sheetOpts + "</select></label>"
+        : "") +
+      mappingSelects(parsed) +
+      '<div class="import-stats">' +
+      "<span>" + summary.total + " linhas válidas</span>" +
+      "<span>" + (parsed.skipped ? parsed.skipped.length : 0) + " puladas</span>" +
+      "<span>" + summary.duplicates + " duplicadas</span>" +
+      "<span>" + summary.withIssues + " com alerta</span>" +
+      "</div>" +
+      '<div class="table-wrap"><table><thead><tr><th>Linha</th><th>Nome</th><th>Tipo</th><th>Estaca</th><th>Ala</th><th>Idade</th><th>Ação</th><th>Alertas</th></tr></thead><tbody>' +
+      (preview
+        .map(function (r) {
+          const acao = r.existingId ? "Atualizar" : r.duplicateInFile ? "Pular" : "Novo";
+          const alerts = (r.issues || [])
+            .map(function (i) {
+              return i.message;
+            })
+            .join("; ");
+          return (
+            "<tr><td>" +
+            r.sheetRow +
+            "</td><td>" +
+            FSY.esc(r.nome) +
+            (r.menor_idade ? " · menor" : "") +
+            "</td><td>" +
+            FSY.esc(r.tipo === "consultor" ? "Consultor" : "Participante") +
+            "</td><td>" +
+            FSY.esc(r.estaca) +
+            "</td><td>" +
+            FSY.esc(r.ala) +
+            "</td><td>" +
+            (r.idade == null ? "—" : r.idade) +
+            "</td><td>" +
+            acao +
+            "</td><td>" +
+            FSY.esc(alerts || "—") +
+            "</td></tr>"
+          );
+        })
+        .join("") || '<tr><td colspan="8">Nenhuma linha válida.</td></tr>') +
+      "</tbody></table></div>" +
+      (issueRows.length
+        ? '<div class="import-issues"><strong>Linhas para revisão</strong><ul>' +
+          issueRows
+            .map(function (r) {
+              return (
+                "<li>Linha " +
+                r.sheetRow +
+                ": " +
+                FSY.esc(
+                  (r.issues || [])
+                    .map(function (i) {
+                      return i.message;
+                    })
+                    .join("; ")
+                ) +
+                "</li>"
+              );
+            })
+            .join("") +
+          "</ul></div>"
+        : "") +
+      (state.importReport ? renderImportReport(state.importReport) : "");
+    if (btn) btn.disabled = rows.length === 0;
+  }
+
+  function renderImportReport(report) {
+    return (
+      '<div class="alert-ok alert" style="margin-top:12px"><strong>Importação concluída.</strong> ' +
+      report.inserted +
+      " novos, " +
+      report.updated +
+      " atualizados, " +
+      report.skipped +
+      " pulados." +
+      (report.failed && report.failed.length
+        ? " " + report.failed.length + " linhas não gravadas (sem exibir dados pessoais)."
+        : "") +
+      "</div>"
+    );
+  }
+
+  function collectMappingFromUi() {
+    const selects = document.querySelectorAll("[data-map-field]");
+    if (!selects.length) return null;
+    const mapping = {};
+    selects.forEach(function (el) {
+      mapping[el.getAttribute("data-map-field")] = Number(el.value);
+    });
+    return mapping;
+  }
+
+  async function enrichImport(parsed) {
+    let rows = (parsed.rows || []).slice();
+    if (parsed.format === "inscricao" && window.FSYImport) {
+      const existing = state.participantes.length ? state.participantes : await FSY.listParticipantes();
+      state.participantes = existing;
+      let sens = [];
+      try {
+        sens = await FSY.listSensiveis();
+      } catch (e) {
+        sens = [];
+      }
+      window.FSYImport.markDuplicates(rows, existing, sens);
+    }
+    state.importParsed = parsed;
+    state.importRows = rows;
+    state.importReport = null;
+  }
+
   function openImport() {
+    state.importFile = null;
+    state.importParsed = null;
+    state.importRows = [];
+    state.importReport = null;
     showModal(
       modalHtml(
-        "Importar planilha",
-        '<div class="stack"><p>Colunas esperadas, nesta ordem: Nome, Ala, Estaca, Contato Líder, Contato Responsável, Consultor, Companhia, Quarto, Observações.</p>' +
-          '<button class="btn btn-outline" data-action="download-modelo">Baixar modelo CSV</button>' +
+        "Importar inscritos",
+        '<div class="stack"><p>Use o arquivo <strong>Porto Alegre Norte 2 - 2027.xlsx</strong> (abas Consultor, Participante e Todas). O app lê a aba <strong>Todas</strong> para importar consultores e participantes sem duplicar.</p>' +
+          '<p class="muted">Telefones e CPFs vêm em vários formatos: o app padroniza o que der e marca o restante para revisão. CPF, RG e dados de saúde não aparecem no preview.</p>' +
+          '<button class="btn btn-outline" data-action="download-modelo-inscricao">Baixar modelo da ficha de inscrição (CSV)</button>' +
+          '<button class="btn btn-ghost" data-action="download-modelo">Baixar modelo operacional antigo</button>' +
           '<label class="field"><span>Arquivo .xlsx ou .csv</span><input id="import-file" type="file" accept=".csv,.xlsx,.xls"></label>' +
           '<div id="import-preview"></div>' +
-          '<label class="field"><span>Como importar</span><select id="import-mode"><option value="append">Adicionar aos existentes</option><option value="replace">Substituir todos os dados</option></select></label>' +
+          '<label class="field"><span>Duplicados (mesmo e-mail ou CPF)</span><select id="import-duplicates"><option value="update">Atualizar o cadastro existente</option><option value="skip">Pular e manter o que já está no app</option></select></label>' +
+          '<label class="field"><span>Como importar</span><select id="import-mode"><option value="append">Adicionar / atualizar</option><option value="replace">Apagar todos e importar de novo</option></select></label>' +
           '<div class="progress hidden" id="import-progress"><span></span></div>' +
           '<div class="row"><button class="btn btn-primary" data-action="confirm-import" disabled id="btn-confirm-import">Confirmar importação</button>' +
-          '<button class="btn btn-ghost" data-action="close-modal">Cancelar</button></div></div>'
+          '<button class="btn btn-ghost" data-action="close-modal">Cancelar</button></div></div>',
+        true
       )
     );
   }
@@ -921,6 +1381,13 @@
     const fc = document.getElementById("filtro-companhia");
     const fe = document.getElementById("filtro-estaca");
     const fs = document.getElementById("filtro-sort");
+    const ft = document.getElementById("filtro-tipo");
+    if (ft)
+      ft.addEventListener("change", function () {
+        state.filters.tipo = ft.value;
+        state.filters.page = 1;
+        render();
+      });
     if (fc)
       fc.addEventListener("change", function () {
         state.filters.companhia = fc.value;
@@ -989,7 +1456,8 @@
                   FSY.esc(r.contato_lider) +
                   "</div>" +
                   (wa ? '<a class="wa" href="' + wa + '" target="_blank" rel="noopener">' + ICONS.wa + " Responsável</a>" : "") +
-                  (r.observacoes ? '<div class="alert" style="margin-top:8px">⚠️ ' + FSY.esc(r.observacoes) + "</div>" : "") +
+                  (r.alimentacao ? '<div class="alert" style="margin-top:8px">Alimentação: ' + FSY.esc(r.alimentacao) + "</div>" : "") +
+                  (r.alerta_saude ? '<div class="alert" style="margin-top:8px">⚠️ Há informação de saúde. Consulte a liderança.</div>' : "") +
                   "</article>"
                 );
               })
@@ -1048,15 +1516,42 @@
     }
     if (action === "export") {
       try {
-        const rows = state.participantes.length ? state.participantes : await FSY.listParticipantes();
-        FSY.downloadText("participantes-fsy-2027.csv", FSY.toCsv(rows), "text/csv;charset=utf-8");
+        const session = FSY.getSession();
+        const includeSensitive = FSY.isLideranca(session) && confirm("Incluir CPF, documento e dados de saúde no CSV? Isso fica registrado.");
+        let rows = state.participantes.length ? state.participantes : await FSY.listParticipantes();
+        if (includeSensitive) {
+          const sens = await FSY.listSensiveis();
+          const byId = {};
+          sens.forEach(function (s) {
+            byId[s.participante_id] = s;
+          });
+          rows = rows.map(function (r) {
+            return Object.assign({}, r, byId[r.id] || {});
+          });
+          await FSY.logAuditoria("exportar", "csv com dados sensíveis", null);
+        } else {
+          await FSY.logAuditoria("exportar", "csv operacional", null);
+        }
+        FSY.downloadText("participantes-fsy-2027.csv", FSY.toCsv(rows, includeSensitive), "text/csv;charset=utf-8");
         toast("CSV gerado.");
       } catch (err) {
         toast(FSY.friendlyError(err));
       }
     }
     if (action === "import") openImport();
-    if (action === "download-modelo") {
+    if (action === "download-modelo-inscricao") {
+      fetch("assets/modelo-inscricao.csv")
+        .then(function (res) {
+          if (!res.ok) throw new Error("fail");
+          return res.text();
+        })
+        .then(function (text) {
+          FSY.downloadText("modelo-inscricao-fsy.csv", text, "text/csv;charset=utf-8");
+        })
+        .catch(function () {
+          toast("Não foi possível baixar o modelo. Use o Excel exportado do formulário.");
+        });
+    }
       FSY.downloadText(
         "modelo-participantes.csv",
         "Nome,Ala,Estaca,Contato Líder,Contato Responsável,Consultor,Companhia,Quarto,Observações\r\nMaria Silva,Ala Centro,Estaca Recife,81999990000,81988880000,Ana Costa,1,101,Alergia a amendoim\r\nJoão Santos,Ala Norte,Estaca Recife,81977770000,81966660000,Ana Costa,1,101,",
@@ -1126,23 +1621,43 @@
     }
     if (action === "confirm-import") {
       if (!state.importRows.length) return;
-      const mode = document.getElementById("import-mode").value;
+      const modeEl = document.getElementById("import-mode");
+      const dupEl = document.getElementById("import-duplicates");
+      const mode = modeEl ? modeEl.value : "append";
+      const duplicates = dupEl ? dupEl.value : "update";
+      if (mode === "replace" && !confirm("Isso apaga todos os participantes atuais. Continuar?")) return;
       const bar = document.getElementById("import-progress");
       bar.classList.remove("hidden");
       const span = bar.querySelector("span");
       try {
-        await withLoading(async function () {
+        const result = await withLoading(async function () {
           const onProgress = function (done, total) {
-            span.style.width = Math.round((done / total) * 100) + "%";
+            span.style.width = Math.round((done / Math.max(total, 1)) * 100) + "%";
           };
-          if (mode === "replace") await FSY.replaceAllParticipantes(state.importRows, onProgress);
+          if (mode === "replace") await FSY.replaceAllParticipantes([], function () {});
+          if (state.importParsed && state.importParsed.format === "inscricao") {
+            const rows = mode === "replace"
+              ? state.importRows.map(function (r) {
+                  const copy = Object.assign({}, r);
+                  copy.existingId = null;
+                  return copy;
+                })
+              : state.importRows;
+            return FSY.importInscritos(rows, { duplicates: duplicates }, onProgress);
+          }
+          if (mode === "replace") await FSY.insertBatch(state.importRows, onProgress);
           else await FSY.insertBatch(state.importRows, onProgress);
+          return { inserted: state.importRows.length, updated: 0, skipped: 0, failed: [] };
         });
         state.participantes = [];
-        closeModal();
-        toast(state.importRows.length + " participantes importados com sucesso");
-        go("participantes");
-        render();
+        state.importReport = result;
+        toast(result.inserted + " novos, " + result.updated + " atualizados.");
+        renderImportPreview();
+        setTimeout(function () {
+          closeModal();
+          go("participantes");
+          render();
+        }, 900);
       } catch (err) {
         toast(FSY.friendlyError(err));
       }
@@ -1150,34 +1665,43 @@
   });
 
   document.addEventListener("change", async function (e) {
+    if (e.target && e.target.id === "import-sheet") {
+      if (!state.importFile) return;
+      try {
+        const parsed = await FSY.parseSpreadsheet(state.importFile, {
+          sheetName: e.target.value,
+          mapping: collectMappingFromUi(),
+          forceFormat: "inscricao",
+        });
+        await enrichImport(parsed);
+        renderImportPreview();
+      } catch (err) {
+        toast(FSY.friendlyError(err));
+      }
+      return;
+    }
+    if (e.target && e.target.getAttribute && e.target.getAttribute("data-map-field")) {
+      if (!state.importFile) return;
+      try {
+        const sheet = document.getElementById("import-sheet");
+        const parsed = await FSY.parseSpreadsheet(state.importFile, {
+          sheetName: sheet ? sheet.value : null,
+          mapping: collectMappingFromUi(),
+          forceFormat: "inscricao",
+        });
+        await enrichImport(parsed);
+        renderImportPreview();
+      } catch (err) {
+        toast(FSY.friendlyError(err));
+      }
+      return;
+    }
     if (e.target && e.target.id === "import-file" && e.target.files[0]) {
       try {
-        const rows = await FSY.parseSpreadsheet(e.target.files[0]);
-        state.importRows = rows;
-        const box = document.getElementById("import-preview");
-        const preview = rows.slice(0, 10);
-        box.innerHTML =
-          "<p><strong>" +
-          rows.length +
-          " participantes encontrados no arquivo</strong></p>" +
-          '<div class="table-wrap"><table><thead><tr><th>Nome</th><th>Ala</th><th>Estaca</th><th>Cia</th></tr></thead><tbody>' +
-          preview
-            .map(function (r) {
-              return (
-                "<tr><td>" +
-                FSY.esc(r.nome) +
-                "</td><td>" +
-                FSY.esc(r.ala) +
-                "</td><td>" +
-                FSY.esc(r.estaca) +
-                "</td><td>" +
-                r.companhia +
-                "</td></tr>"
-              );
-            })
-            .join("") +
-          "</tbody></table></div>";
-        document.getElementById("btn-confirm-import").disabled = rows.length === 0;
+        state.importFile = e.target.files[0];
+        const parsed = await FSY.parseSpreadsheet(state.importFile);
+        await enrichImport(parsed);
+        renderImportPreview();
       } catch (err) {
         toast(FSY.friendlyError(err));
       }
@@ -1234,17 +1758,53 @@
         return;
       }
       if (type === "participante") {
+        const boolOrNull = function (v) {
+          if (v === "true") return true;
+          if (v === "false") return false;
+          return null;
+        };
         const row = {
           nome: fd.get("nome"),
+          sobrenome: fd.get("sobrenome"),
+          nome_preferencia: fd.get("nome_preferencia"),
+          data_nascimento: fd.get("data_nascimento"),
+          sexo: fd.get("sexo"),
+          telefone: fd.get("telefone"),
+          email: fd.get("email"),
+          idade: fd.get("idade"),
+          tipo: fd.get("tipo"),
+          situacao: fd.get("situacao"),
+          membro_igreja: boolOrNull(fd.get("membro_igreja")),
           ala: fd.get("ala"),
           estaca: fd.get("estaca"),
-          contato_lider: fd.get("contato_lider"),
-          contato_responsavel: fd.get("contato_responsavel"),
+          bispo_nome: fd.get("bispo_nome"),
+          bispo_email: fd.get("bispo_email"),
           consultor: fd.get("consultor"),
           companhia: fd.get("companhia"),
           quarto: fd.get("quarto"),
+          tamanho_camiseta: fd.get("tamanho_camiseta"),
+          contato_lider: fd.get("contato_lider"),
+          contato_responsavel: fd.get("contato_responsavel"),
+          contato1_nome: fd.get("contato1_nome"),
+          contato1_email: fd.get("contato1_email"),
+          contato1_telefone: fd.get("contato1_telefone"),
+          contato2_nome: fd.get("contato2_nome"),
+          contato2_email: fd.get("contato2_email"),
+          contato2_telefone: fd.get("contato2_telefone"),
+          nome_responsavel: fd.get("nome_responsavel"),
+          telefone_responsavel: fd.get("telefone_responsavel"),
+          autorizacao_pais: boolOrNull(fd.get("autorizacao_pais")),
+          alimentacao: fd.get("alimentacao"),
+          info_medicas: fd.get("info_medicas"),
+          condicoes_saude: fd.get("condicoes_saude"),
+          detalhe_saude: fd.get("detalhe_saude"),
+          documento: fd.get("documento"),
+          orgao_emissor: fd.get("orgao_emissor"),
+          cpf: fd.get("cpf"),
+          apresentacao: fd.get("apresentacao"),
           observacoes: fd.get("observacoes"),
         };
+        row.alerta_saude = Boolean(row.info_medicas || row.condicoes_saude || row.detalhe_saude);
         await withLoading(function () {
           return FSY.saveParticipante(row, form.getAttribute("data-id") || null);
         });
@@ -1264,7 +1824,12 @@
   window.addEventListener("hashchange", render);
   (async function boot() {
     try {
-      await FSY.restoreSession();
+      await Promise.race([
+        FSY.restoreSession(),
+        new Promise(function (resolve) {
+          setTimeout(resolve, 7000);
+        }),
+      ]);
     } catch (err) {
       toast(FSY.friendlyError(err));
     }

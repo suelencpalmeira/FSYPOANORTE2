@@ -70,6 +70,10 @@ A interface é mobile-first: botões grandes, navegação inferior e tabelas que
 
 ## Importação
 
-Na lista de participantes, use **Importar planilha**. O modelo CSV está em `assets/modelo-participantes.csv`.
+Na lista de participantes, use **Importar planilha**.
 
-Colunas: `Nome, Ala, Estaca, Contato Líder, Contato Responsável, Consultor, Companhia, Quarto, Observações`.
+O app lê a aba **Todas** da planilha Excel do formulário de inscrição (34 colunas). Consultor e Participante ficam na coluna **Tipo**, então não importe as outras abas para não duplicar.
+
+Antes de gravar, aparece um preview com mapeamento de colunas, duplicados (mesmo e-mail ou CPF) e alertas linha a linha (e-mail ausente, CPF inválido, telefone fora do padrão). CPF, RG e dados de saúde não entram no preview nem em mensagens de erro.
+
+Há também um CSV operacional antigo em `assets/modelo-participantes.csv` (Nome, Ala, Estaca, Contato Líder, Contato Responsável, Consultor, Companhia, Quarto, Observações).

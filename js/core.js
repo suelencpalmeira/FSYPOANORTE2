@@ -388,44 +388,148 @@ create policy participantes_anon_all on public.participantes for all to anon, au
     return data || [];
   }
 
+  function emptyToNull(value) {
+    if (value == null) return null;
+    const s = String(value).trim();
+    return s ? s : null;
+  }
+
+  function displayNome(row) {
+    if (!row) return "—";
+    return emptyToNull(row.nome_preferencia) || emptyToNull(row.nome) || "—";
+  }
+
+  function publicParticipantePayload(row) {
+    const companhiaRaw = row.companhia;
+    const companhia =
+      companhiaRaw === "" || companhiaRaw == null ? null : Number(companhiaRaw);
+    const idadeRaw = row.idade === "" || row.idade == null ? null : Number(row.idade);
+    const idade = Number.isInteger(idadeRaw) ? idadeRaw : null;
+    return {
+      nome: String(row.nome || "").trim(),
+      sobrenome: emptyToNull(row.sobrenome),
+      nome_preferencia: emptyToNull(row.nome_preferencia),
+      data_nascimento: emptyToNull(row.data_nascimento),
+      sexo: emptyToNull(row.sexo),
+      telefone: emptyToNull(row.telefone),
+      email: emptyToNull(row.email) ? String(row.email).trim().toLowerCase() : null,
+      tamanho_camiseta: emptyToNull(row.tamanho_camiseta),
+      alimentacao: emptyToNull(row.alimentacao),
+      contato1_nome: emptyToNull(row.contato1_nome),
+      contato1_email: emptyToNull(row.contato1_email),
+      contato1_telefone: emptyToNull(row.contato1_telefone),
+      contato2_nome: emptyToNull(row.contato2_nome),
+      contato2_email: emptyToNull(row.contato2_email),
+      contato2_telefone: emptyToNull(row.contato2_telefone),
+      idade: idade,
+      submetido_em: emptyToNull(row.submetido_em),
+      situacao: row.situacao === "aprovado" ? "aprovado" : "pendente",
+      tipo: row.tipo === "consultor" ? "consultor" : "participante",
+      estaca: String(row.estaca || "").trim() || "—",
+      ala: String(row.ala || "").trim() || "—",
+      bispo_email: emptyToNull(row.bispo_email),
+      bispo_nome: emptyToNull(row.bispo_nome),
+      apresentacao: emptyToNull(row.apresentacao),
+      membro_igreja: row.membro_igreja == null || row.membro_igreja === "" ? null : Boolean(row.membro_igreja),
+      alerta_saude: Boolean(row.alerta_saude),
+      menor_idade: idade != null ? idade < 18 : Boolean(row.menor_idade),
+      contato_lider: String(row.contato_lider || "").trim() || "—",
+      contato_responsavel: String(row.contato_responsavel || "").trim() || "—",
+      consultor: String(row.consultor || "").trim() || "—",
+      companhia: Number.isInteger(companhia) ? companhia : null,
+      quarto: emptyToNull(row.quarto),
+      observacoes: emptyToNull(row.observacoes),
+    };
+  }
+
+  function sensitiveParticipantePayload(row) {
+    const cpf = emptyToNull(row.cpf) ? String(row.cpf).replace(/\D/g, "") : null;
+    return {
+      documento: emptyToNull(row.documento),
+      orgao_emissor: emptyToNull(row.orgao_emissor),
+      cpf: cpf || null,
+      cpf_valido: row.cpf_valido == null ? (cpf ? cpf.length === 11 : null) : Boolean(row.cpf_valido),
+      nome_responsavel: emptyToNull(row.nome_responsavel),
+      telefone_responsavel: emptyToNull(row.telefone_responsavel),
+      autorizacao_pais: row.autorizacao_pais == null || row.autorizacao_pais === "" ? null : Boolean(row.autorizacao_pais),
+      info_medicas: emptyToNull(row.info_medicas),
+      condicoes_saude: emptyToNull(row.condicoes_saude),
+      detalhe_saude: emptyToNull(row.detalhe_saude),
+    };
+  }
+
+  function hasSensitivePayload(payload) {
+    return Object.keys(payload).some(function (k) {
+      if (k === "cpf_valido") return false;
+      return payload[k] != null && payload[k] !== "";
+    });
+  }
+
+  async function logAuditoria(acao, detalhes, participanteId) {
+    try {
+      const s = getSession();
+      await client().from("auditoria_acesso").insert({
+        usuario_id: s && s.id ? s.id : null,
+        usuario_email: s && s.email ? s.email : null,
+        acao: acao,
+        participante_id: participanteId || null,
+        detalhes: detalhes || null,
+      });
+    } catch (e) {}
+  }
+
+  async function listSensiveis() {
+    await assertLideranca();
+    const { data, error } = await client().from("participantes_sensiveis").select("*");
+    if (error) throw error;
+    return data || [];
+  }
+
+  async function upsertSensivel(participanteId, row) {
+    const payload = sensitiveParticipantePayload(row);
+    if (!hasSensitivePayload(payload) && !row.forceSensitive) return;
+    payload.participante_id = participanteId;
+    const { error } = await client()
+      .from("participantes_sensiveis")
+      .upsert(payload, { onConflict: "participante_id" });
+    if (error) throw error;
+  }
+
   async function getParticipante(id) {
     const { data, error } = await client().from("participantes").select("*").eq("id", id).single();
     if (error) throw error;
-    return data;
+    if (!isLideranca()) return data;
+    const sens = await client()
+      .from("participantes_sensiveis")
+      .select("*")
+      .eq("participante_id", id)
+      .maybeSingle();
+    if (sens.error) throw sens.error;
+    await logAuditoria("visualizar_ficha", "consulta de ficha", id);
+    return Object.assign({}, data, sens.data || {});
   }
 
   async function saveParticipante(row, id) {
     await assertLideranca();
-    const payload = {
-      nome: String(row.nome || "").trim(),
-      ala: String(row.ala || "").trim(),
-      estaca: String(row.estaca || "").trim(),
-      contato_lider: String(row.contato_lider || "").trim(),
-      contato_responsavel: String(row.contato_responsavel || "").trim(),
-      consultor: String(row.consultor || "").trim(),
-      companhia: Number(row.companhia),
-      quarto: String(row.quarto || "").trim() || null,
-      observacoes: String(row.observacoes || "").trim() || null,
-    };
-    if (
-      !payload.nome ||
-      !payload.ala ||
-      !payload.estaca ||
-      !payload.contato_lider ||
-      !payload.contato_responsavel ||
-      !payload.consultor ||
-      !Number.isInteger(payload.companhia)
-    ) {
-      throw new Error("Preencha todos os campos obrigatórios.");
+    const payload = publicParticipantePayload(row);
+    if (!payload.nome) {
+      throw new Error("Preencha o nome do participante.");
     }
+    if (!payload.ala || !payload.estaca || !payload.contato_lider || !payload.contato_responsavel || !payload.consultor) {
+      throw new Error("Preencha ala, estaca, consultor e os contatos.");
+    }
+    let savedId = id || null;
     if (id) {
       const { error } = await client().from("participantes").update(payload).eq("id", id);
       if (error) throw error;
-      return id;
+    } else {
+      const { data, error } = await client().from("participantes").insert(payload).select("id").single();
+      if (error) throw error;
+      savedId = data.id;
     }
-    const { data, error } = await client().from("participantes").insert(payload).select("id").single();
-    if (error) throw error;
-    return data.id;
+    await upsertSensivel(savedId, row);
+    await logAuditoria(id ? "atualizar_participante" : "criar_participante", "ficha salva", savedId);
+    return savedId;
   }
 
   async function deleteParticipante(id) {
@@ -443,13 +547,117 @@ create policy participantes_anon_all on public.participantes for all to anon, au
 
   async function insertBatch(rows, onProgress) {
     await assertLideranca();
-    const chunk = 50;
+    const chunk = 25;
     for (let i = 0; i < rows.length; i += chunk) {
       const slice = rows.slice(i, i + chunk);
-      const { error } = await client().from("participantes").insert(slice);
+      const publics = slice.map(publicParticipantePayload);
+      const { data, error } = await client().from("participantes").insert(publics).select("id");
       if (error) throw error;
+      const ids = data || [];
+      const sensiveis = [];
+      slice.forEach(function (row, idx) {
+        if (!ids[idx]) return;
+        const payload = sensitiveParticipantePayload(row);
+        if (!hasSensitivePayload(payload)) return;
+        payload.participante_id = ids[idx].id;
+        sensiveis.push(payload);
+      });
+      if (sensiveis.length) {
+        const { error: sErr } = await client().from("participantes_sensiveis").upsert(sensiveis, { onConflict: "participante_id" });
+        if (sErr) throw sErr;
+      }
       if (onProgress) onProgress(Math.min(rows.length, i + slice.length), rows.length);
     }
+  }
+
+  async function importInscritos(rows, options, onProgress) {
+    await assertLideranca();
+    const opts = options || {};
+    const duplicates = opts.duplicates === "skip" ? "skip" : "update";
+    const result = { inserted: 0, updated: 0, skipped: 0, failed: [] };
+    const work = [];
+    rows.forEach(function (row) {
+      if (row.duplicateInFile && !row.existingId) {
+        result.skipped += 1;
+        return;
+      }
+      if (row.existingId && duplicates === "skip") {
+        result.skipped += 1;
+        return;
+      }
+      work.push(row);
+    });
+
+    const toUpdate = work.filter(function (r) { return r.existingId; });
+    const toInsert = work.filter(function (r) { return !r.existingId; });
+    const total = toUpdate.length + toInsert.length;
+    let done = 0;
+
+    for (let i = 0; i < toUpdate.length; i += 1) {
+      const row = toUpdate[i];
+      try {
+        const { error } = await client()
+          .from("participantes")
+          .update(publicParticipantePayload(row))
+          .eq("id", row.existingId);
+        if (error) throw error;
+        await upsertSensivel(row.existingId, Object.assign({ forceSensitive: true }, row));
+        result.updated += 1;
+      } catch (err) {
+        result.failed.push({ sheetRow: row.sheetRow, message: "Não foi possível atualizar a linha." });
+      }
+      done += 1;
+      if (onProgress) onProgress(done, total);
+    }
+
+    const chunk = 25;
+    for (let i = 0; i < toInsert.length; i += chunk) {
+      const slice = toInsert.slice(i, i + chunk);
+      try {
+        const publics = slice.map(publicParticipantePayload);
+        const { data, error } = await client().from("participantes").insert(publics).select("id");
+        if (error) throw error;
+        const ids = data || [];
+        const sensiveis = [];
+        slice.forEach(function (row, idx) {
+          if (!ids[idx]) return;
+          const payload = sensitiveParticipantePayload(row);
+          if (!hasSensitivePayload(payload)) return;
+          payload.participante_id = ids[idx].id;
+          sensiveis.push(payload);
+        });
+        if (sensiveis.length) {
+          const { error: sErr } = await client().from("participantes_sensiveis").upsert(sensiveis, { onConflict: "participante_id" });
+          if (sErr) throw sErr;
+        }
+        result.inserted += slice.length;
+      } catch (err) {
+        for (let j = 0; j < slice.length; j += 1) {
+          const row = slice[j];
+          try {
+            const { data, error } = await client()
+              .from("participantes")
+              .insert(publicParticipantePayload(row))
+              .select("id")
+              .single();
+            if (error) throw error;
+            await upsertSensivel(data.id, row);
+            result.inserted += 1;
+          } catch (rowErr) {
+            result.failed.push({ sheetRow: row.sheetRow, message: "Não foi possível inserir a linha." });
+          }
+        }
+      }
+      done += slice.length;
+      if (onProgress) onProgress(Math.min(done, total), total);
+    }
+
+    await logAuditoria(
+      "importar",
+      "inseridos " + result.inserted + ", atualizados " + result.updated + ", pulados " + result.skipped,
+      null
+    );
+    return result;
   }
 
   async function searchParticipantes(term) {
@@ -459,7 +667,7 @@ create policy participantes_anon_all on public.participantes for all to anon, au
     const { data, error } = await client()
       .from("participantes")
       .select("*")
-      .or("nome.ilike." + like + ",ala.ilike." + like + ",estaca.ilike." + like)
+      .or("nome.ilike." + like + ",nome_preferencia.ilike." + like + ",ala.ilike." + like + ",estaca.ilike." + like + ",email.ilike." + like)
       .order("nome")
       .limit(50);
     if (error) throw error;
@@ -560,32 +768,92 @@ create policy participantes_anon_all on public.participantes for all to anon, au
     return count || 0;
   }
 
-  function toCsv(rows) {
+  function toCsv(rows, includeSensitive) {
     const headers = [
       "Nome",
-      "Ala",
+      "Sobrenome",
+      "Nome de preferência",
+      "Data de nascimento",
+      "Sexo",
+      "Telefone",
+      "E-mail",
+      "Tamanho da camiseta",
+      "Alimentação",
+      "Nome do contato 1",
+      "E-mail para contato 1",
+      "Telefone para contato 1",
+      "Nome do contato 2",
+      "E-mail do contato 2",
+      "Telefone para contato 2",
+      "Idade",
+      "Situação",
+      "Tipo",
       "Estaca",
+      "Ala",
+      "Consultor",
       "Companhia",
       "Quarto",
-      "Consultor",
-      "Contato Líder",
-      "Contato Responsável",
-      "Observações",
+      "E-mail do bispo",
+      "Nome do bispo",
+      "Membro da Igreja",
+      "Apresentação",
     ];
+    if (includeSensitive) {
+      headers.push(
+        "Nome do Responsável",
+        "Telefone do Responsável",
+        "Documento",
+        "Órgão emissor",
+        "CPF",
+        "Informações médicas",
+        "Condições de saúde",
+        "Detalhe de saúde"
+      );
+    }
     const lines = [headers.join(",")];
     rows.forEach(function (r) {
       const vals = [
         r.nome,
-        r.ala,
+        r.sobrenome,
+        r.nome_preferencia,
+        r.data_nascimento,
+        r.sexo,
+        r.telefone,
+        r.email,
+        r.tamanho_camiseta,
+        r.alimentacao,
+        r.contato1_nome,
+        r.contato1_email,
+        r.contato1_telefone,
+        r.contato2_nome,
+        r.contato2_email,
+        r.contato2_telefone,
+        r.idade,
+        r.situacao,
+        r.tipo,
         r.estaca,
-        r.companhia,
-        r.quarto || "",
+        r.ala,
         r.consultor,
-        r.contato_lider,
-        r.contato_responsavel,
-        r.observacoes || "",
-      ].map(csvCell);
-      lines.push(vals.join(","));
+        r.companhia,
+        r.quarto,
+        r.bispo_email,
+        r.bispo_nome,
+        r.membro_igreja == null ? "" : r.membro_igreja ? "sim" : "não",
+        r.apresentacao,
+      ];
+      if (includeSensitive) {
+        vals.push(
+          r.nome_responsavel,
+          r.telefone_responsavel,
+          r.documento,
+          r.orgao_emissor,
+          r.cpf,
+          r.info_medicas,
+          r.condicoes_saude,
+          r.detalhe_saude
+        );
+      }
+      lines.push(vals.map(csvCell).join(","));
     });
     return lines.join("\r\n");
   }
@@ -636,7 +904,70 @@ create policy participantes_anon_all on public.participantes for all to anon, au
     "observacoes",
   ];
 
-  function parseSpreadsheet(file) {
+  function parseLegacySpreadsheet(matrix) {
+    const header = matrix[0].map(normalizeHeader);
+    const mapped = header.map(function (h) {
+      return COL_MAP[h] || null;
+    });
+    const useOrder = mapped.filter(Boolean).length < 3;
+    const rows = [];
+    for (let i = 1; i < matrix.length; i += 1) {
+      const line = matrix[i];
+      if (!line || line.every(function (c) { return String(c).trim() === ""; })) continue;
+      const obj = {
+        nome: "",
+        ala: "",
+        estaca: "",
+        contato_lider: "",
+        contato_responsavel: "",
+        consultor: "",
+        companhia: "",
+        quarto: "",
+        observacoes: "",
+      };
+      if (useOrder) {
+        ORDER_KEYS.forEach(function (k, idx) {
+          obj[k] = line[idx] != null ? String(line[idx]).trim() : "";
+        });
+      } else {
+        mapped.forEach(function (k, idx) {
+          if (k) obj[k] = line[idx] != null ? String(line[idx]).trim() : "";
+        });
+      }
+      obj.companhia = parseInt(String(obj.companhia).replace(/\D/g, ""), 10);
+      if (!obj.nome || !Number.isInteger(obj.companhia)) continue;
+      rows.push({
+        sheetRow: i + 1,
+        issues: [],
+        existingId: null,
+        nome: obj.nome,
+        ala: obj.ala || "—",
+        estaca: obj.estaca || "—",
+        contato_lider: obj.contato_lider || "—",
+        contato_responsavel: obj.contato_responsavel || "—",
+        consultor: obj.consultor || "—",
+        companhia: obj.companhia,
+        quarto: obj.quarto || null,
+        observacoes: obj.observacoes || null,
+        tipo: "participante",
+        situacao: "pendente",
+      });
+    }
+    return {
+      format: "legado",
+      sheetName: null,
+      sheetNames: [],
+      headers: matrix[0],
+      mapping: {},
+      mappedCount: mapped.filter(Boolean).length,
+      expected: [],
+      rows: rows,
+      skipped: [],
+    };
+  }
+
+  function parseSpreadsheet(file, options) {
+    const opts = options || {};
     return new Promise(function (resolve, reject) {
       const reader = new FileReader();
       reader.onerror = function () {
@@ -645,54 +976,25 @@ create policy participantes_anon_all on public.participantes for all to anon, au
       reader.onload = function (e) {
         try {
           if (!global.XLSX) throw new Error("A biblioteca de planilhas não carregou.");
-          const wb = XLSX.read(e.target.result, { type: "array" });
+          const wb = XLSX.read(e.target.result, { type: "array", cellDates: true });
+          const Imp = global.FSYImport;
+          if (Imp) {
+            const inscription = Imp.parseInscricaoWorkbook(wb, opts);
+            if (opts.forceFormat === "legado") {
+              const sheet = wb.Sheets[wb.SheetNames[0]];
+              const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+              resolve(parseLegacySpreadsheet(matrix));
+              return;
+            }
+            if (opts.forceFormat === "inscricao" || Imp.looksLikeInscricao(inscription.mapping) || inscription.mappedCount >= 8 || Imp.normalizeHeader(inscription.sheetName) === "todas") {
+              resolve(inscription);
+              return;
+            }
+          }
           const sheet = wb.Sheets[wb.SheetNames[0]];
           const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
           if (!matrix.length) throw new Error("A planilha está vazia.");
-          const header = matrix[0].map(normalizeHeader);
-          const mapped = header.map(function (h) {
-            return COL_MAP[h] || null;
-          });
-          const useOrder = mapped.filter(Boolean).length < 3;
-          const rows = [];
-          for (let i = 1; i < matrix.length; i += 1) {
-            const line = matrix[i];
-            if (!line || line.every(function (c) { return String(c).trim() === ""; })) continue;
-            const obj = {
-              nome: "",
-              ala: "",
-              estaca: "",
-              contato_lider: "",
-              contato_responsavel: "",
-              consultor: "",
-              companhia: "",
-              quarto: "",
-              observacoes: "",
-            };
-            if (useOrder) {
-              ORDER_KEYS.forEach(function (k, idx) {
-                obj[k] = line[idx] != null ? String(line[idx]).trim() : "";
-              });
-            } else {
-              mapped.forEach(function (k, idx) {
-                if (k) obj[k] = line[idx] != null ? String(line[idx]).trim() : "";
-              });
-            }
-            obj.companhia = parseInt(String(obj.companhia).replace(/\D/g, ""), 10);
-            if (!obj.nome || !Number.isInteger(obj.companhia)) continue;
-            rows.push({
-              nome: obj.nome,
-              ala: obj.ala || "—",
-              estaca: obj.estaca || "—",
-              contato_lider: obj.contato_lider || "—",
-              contato_responsavel: obj.contato_responsavel || "—",
-              consultor: obj.consultor || "—",
-              companhia: obj.companhia,
-              quarto: obj.quarto || null,
-              observacoes: obj.observacoes || null,
-            });
-          }
-          resolve(rows);
+          resolve(parseLegacySpreadsheet(matrix));
         } catch (err) {
           reject(err);
         }
@@ -744,5 +1046,10 @@ create policy participantes_anon_all on public.participantes for all to anon, au
     toCsv,
     downloadText,
     parseSpreadsheet,
+    importInscritos,
+    listSensiveis,
+    logAuditoria,
+    displayNome,
+    publicParticipantePayload,
   };
 })(window);
